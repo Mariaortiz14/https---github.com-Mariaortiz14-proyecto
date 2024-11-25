@@ -131,8 +131,7 @@ class EventWithUser(BaseModel):
     title: str
     description: str
     event_date: datetime
-    user: UserResponse  # Incluye la información del usuario asociada
-
+    user: UserResponse 
     class Config:
         orm_mode = True
 
@@ -196,18 +195,7 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
         print(f"Error: {e}")
         raise HTTPException(status_code=500, detail="Error al crear el usuario")
 
-@app.post("/login/")
-def login_user(login: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == login.username).first()
-    if user is None or not bcrypt.checkpw(login.password.encode('utf-8'), user.hashed_password.encode('utf-8')):
-        raise HTTPException(status_code=401, detail="Usuario o contraseña inválidos")
-    
-    return {
-        "message": "Inicio de sesión exitoso",
-        "user_id": user.id,  # Retornar el user_id
-        "name": user.name,
-        "token": "some_jwt_token"  # Si usas un token JWT
-    }
+
 
 @app.put("/users/{user_id}/profile-image", response_model=UserResponse)
 async def upload_profile_image(
@@ -245,18 +233,15 @@ def update_user_profile(
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    # Actualizar los campos del usuario
     user.name = firstName
     user.surname = lastName
     user.email = email
 
-    # Verificar y actualizar la contraseña
     if currentPassword and newPassword:
         if not bcrypt.checkpw(currentPassword.encode('utf-8'), user.hashed_password.encode('utf-8')):
             raise HTTPException(status_code=400, detail="La contraseña actual no es correcta")
         user.hashed_password = bcrypt.hashpw(newPassword.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
-    # Manejar la carga de una nueva imagen
     if file:
         file_path = f"static/profile_images/{user_id}_{file.filename}"
         with open(file_path, "wb") as f:
@@ -268,8 +253,18 @@ def update_user_profile(
 
     return {"message": "Perfil actualizado exitosamente"}
 
-
-# Rutas de eventos
+@app.post("/login/")
+def login_user(login: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == login.username).first()
+    if user is None or not bcrypt.checkpw(login.password.encode('utf-8'), user.hashed_password.encode('utf-8')):
+        raise HTTPException(status_code=401, detail="Usuario o contraseña inválidos")
+    
+    return {
+        "message": "Inicio de sesión exitoso",
+        "user_id": user.id, 
+        "name": user.name,
+        "token": "some_jwt_token" 
+    }
 
 @app.post("/events/", response_model=EventResponse)
 def create_event_route(event: EventCreate, db: Session = Depends(get_db)):
@@ -298,11 +293,9 @@ def read_event(event_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Evento no encontrado")
     return db_event
 
-from sqlalchemy import desc  # Importa la función `desc` para ordenar en orden descendente
 
 @app.get("/events/", response_model=List[EventResponse])
 def list_events(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
-    # Ordenar por `created_at` en orden descendente para obtener los eventos más recientes
     events = db.query(Event).order_by(desc(Event.created_at)).offset(skip).limit(limit).all()
     return events
 
