@@ -1,9 +1,11 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File ,Form, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, ForeignKey, Enum, DECIMAL ,desc
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from sqlalchemy.sql import func
+import shutil
 import os
 from pydantic import BaseModel, EmailStr, root_validator
 from datetime import datetime
@@ -11,18 +13,21 @@ from typing import Optional, List
 import bcrypt
 import re
 
-DATABASE_URL = "mysql+pymysql://root:00000@localhost/happenit"
+DATABASE_URL = "mysql+pymysql://root:00000@localhost/Happenit"
+
+
 PROFILE_IMAGE_PATH = "static/profile_images"
 if not os.path.exists(PROFILE_IMAGE_PATH):
     os.makedirs(PROFILE_IMAGE_PATH)
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 Base = declarative_base()
 
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
-
+app.mount("/static", StaticFiles(directory="static"), name="static")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],  
@@ -31,6 +36,9 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+UPLOAD_DIR = "uploads"  # Carpeta donde se guardarán las imágenes
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 
 def get_db():
     db = SessionLocal()
@@ -38,6 +46,10 @@ def get_db():
         yield db
     finally:
         db.close()
+
+UPLOAD_DIR = "static/event_images"
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR)
 
 # Modelos de Base de Datos
 
@@ -62,7 +74,9 @@ class Event(Base):
     title = Column(String(200), nullable=False)
     description = Column(String, nullable=False)
     event_date = Column(DateTime, nullable=False)
-    created_at = Column(DateTime, default=func.now())
+    location = Column(String(255), nullable=False)  # Nuevo campo
+    category = Column(Enum("gastronomía", "conferencias", "deportes", "festival", "conciertos", "teatros", "otro"), nullable=False)  # Nuevo campo
+    created_at = Column(DateTime, default=datetime.utcnow)
     image_url = Column(String(255), nullable=True)
 
     user = relationship("User", back_populates="events")
@@ -196,7 +210,6 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Error al crear el usuario")
 
 
-
 @app.put("/users/{user_id}/profile-image", response_model=UserResponse)
 async def upload_profile_image(
     user_id: int,
@@ -207,16 +220,18 @@ async def upload_profile_image(
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    file_location = os.path.join(PROFILE_IMAGE_PATH, f"{user_id}_{file.filename}")
-    with open(file_location, "wb") as image_file:
+    # Guardar la imagen en una ruta accesible
+    file_path = f"static/profile_images/{user_id}_{file.filename}"
+    with open(file_path, "wb") as image_file:
         content = await file.read()
         image_file.write(content)
 
-    user.image = file_location
+    # Guardar solo la ruta relativa en la base de datos
+    user.image = file_path.replace("static/", "")  # Guardar solo "profile_images/..."
     db.commit()
     db.refresh(user)
-    return user
 
+    return user
 
 @app.put("/users/{user_id}/profile")
 def update_user_profile(
@@ -233,25 +248,30 @@ def update_user_profile(
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
+    # Actualizar los datos personales
     user.name = firstName
     user.surname = lastName
     user.email = email
 
+    # Verificar si se quiere cambiar la contraseña
     if currentPassword and newPassword:
         if not bcrypt.checkpw(currentPassword.encode('utf-8'), user.hashed_password.encode('utf-8')):
             raise HTTPException(status_code=400, detail="La contraseña actual no es correcta")
         user.hashed_password = bcrypt.hashpw(newPassword.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
+    # Si se envía un archivo, actualizar la imagen sin depender de la contraseña
     if file:
         file_path = f"static/profile_images/{user_id}_{file.filename}"
         with open(file_path, "wb") as f:
             f.write(file.file.read())
-        user.image = file_path
+
+        # Guardar solo la ruta relativa
+        user.image = file_path.replace("static/", "")  
 
     db.commit()
     db.refresh(user)
 
-    return {"message": "Perfil actualizado exitosamente"}
+    return {"message": "Perfil actualizado exitosamente", "image_url": user.image}
 
 @app.post("/login/")
 def login_user(login: LoginRequest, db: Session = Depends(get_db)):
@@ -267,14 +287,34 @@ def login_user(login: LoginRequest, db: Session = Depends(get_db)):
     }
 
 @app.post("/events/", response_model=EventResponse)
-def create_event_route(event: EventCreate, db: Session = Depends(get_db)):
+async def create_event_route(
+    user_id: int = Form(...),
+    title: str = Form(...),
+    description: str = Form(...),
+    event_date: datetime = Form(...),
+    location: str = Form(...),  # Nuevo campo
+    category: str = Form(...),  # Nuevo campo
+    image: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db)
+):
+    if category not in ["gastronomía", "conferencias", "deportes", "festival", "conciertos", "teatros", "otro"]:
+        raise HTTPException(status_code=400, detail="Categoría no válida")
+
     try:
+        image_path = None
+        if image:
+            file_location = f"{UPLOAD_DIR}/{image.filename}"
+            with open(file_location, "wb") as buffer:
+                shutil.copyfileobj(image.file, buffer)
+            image_path = file_location
+
         db_event = Event(
-            user_id=event.user_id,
-            title=event.title,
-            description=event.description,
-            event_date=event.event_date,
-            image_url=event.image_url,
+            user_id=user_id,
+            title=title,
+            description=description,
+            event_date=event_date,
+            location=location,  
+            image_url=image_path,
         )
         db.add(db_event)
         db.commit()
@@ -283,21 +323,22 @@ def create_event_route(event: EventCreate, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Error al crear el evento: {e}")
         raise HTTPException(status_code=500, detail="Error al crear el evento")
+    
 
-
-
-@app.get("/events/{event_id}", response_model=EventResponse)
-def read_event(event_id: int, db: Session = Depends(get_db)):
-    db_event = get_event_by_id(db, event_id)
-    if db_event is None:
-        raise HTTPException(status_code=404, detail="Evento no encontrado")
-    return db_event
-
-
-@app.get("/events/", response_model=List[EventResponse])
+@app.get("/events/", response_model=List[EventWithUser])
 def list_events(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    events = db.query(Event).order_by(desc(Event.created_at)).offset(skip).limit(limit).all()
+    today = datetime.utcnow()
+    events = (
+        db.query(Event)
+        .join(User)
+        .filter(Event.event_date >= today)
+        .order_by(desc(Event.created_at))
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     return events
+
 
 
 @app.get("/users/{user_id}/events/", response_model=List[EventResponse])
@@ -330,7 +371,15 @@ def update_event(event_id: int, event_update: EventUpdate, db: Session = Depends
     db.refresh(db_event)
     return db_event
 
+@app.post("/upload-image/")
+async def upload_image(file: UploadFile = File(...)):
+    file_location = f"{UPLOAD_DIR}/{file.filename}"
+    
+    # Guardar la imagen en el servidor
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
+    return {"filename": file.filename}
 
 @app.get("/")
 def read_root():
