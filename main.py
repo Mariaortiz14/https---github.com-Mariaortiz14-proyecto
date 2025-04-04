@@ -295,7 +295,7 @@ def read_event(event_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/events/", response_model=List[EventResponse])
-def list_events(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
+def list_events(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     events = db.query(Event).order_by(desc(Event.created_at)).offset(skip).limit(limit).all()
     return events
 
